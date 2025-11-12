@@ -14,11 +14,7 @@ dotenv.config();
  * @throws {Error} Si une variable requise est manquante
  */
 export function loadConfig() {
-  const required = [
-    "AGENT_BACKEND_URL",
-    "AGENT_TOKEN",
-    "AGENT_HOSTNAME",
-  ];
+  const required = ["AGENT_TOKEN", "AGENT_HOSTNAME"];
 
   const missing = required.filter((key) => !process.env[key]);
 
@@ -28,9 +24,14 @@ export function loadConfig() {
     );
   }
 
+  const backendUrl = process.env.AGENT_BACKEND_URL || null;
+  const clientToken =
+    process.env.AGENT_CLIENT_TOKEN || process.env.AGENT_TOKEN || null;
+
   return {
-    backendUrl: process.env.AGENT_BACKEND_URL,
+    backendUrl,
     token: process.env.AGENT_TOKEN,
+    clientToken,
     hostname: process.env.AGENT_HOSTNAME,
     serverId: process.env.AGENT_SERVER_ID || null,
     heartbeatInterval: parseInt(
@@ -48,6 +49,11 @@ export function loadConfig() {
     logLevel: process.env.AGENT_LOG_LEVEL || "info",
     dockerSocketPath:
       process.env.DOCKER_SOCKET_PATH || "/var/run/docker.sock",
+    frontendPort: parseInt(
+      process.env.AGENT_FRONTEND_PORT || "7080",
+      10
+    ),
+    frontendHost: process.env.AGENT_FRONTEND_HOST || "0.0.0.0",
   };
 }
 

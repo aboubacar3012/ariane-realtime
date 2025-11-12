@@ -21,9 +21,14 @@ import { isValidDockerAction } from "../utils/validator.js";
  * Traite un message reçu du backend
  * @param {Object} message - Message reçu
  * @param {Function} sendMessage - Fonction pour envoyer une réponse
+ * @param {Function} [registerResource] - Callback pour enregistrer une ressource (ex: stream) associée à l'ID
  * @returns {Promise<void>}
  */
-export async function handleMessage(message, sendMessage) {
+export async function handleMessage(
+  message,
+  sendMessage,
+  registerResource = () => {}
+) {
   const { id, action, params = {} } = message;
 
   if (!id) {
@@ -32,6 +37,8 @@ export async function handleMessage(message, sendMessage) {
   }
 
   try {
+    let isStreamingAction = false;
+
     // Parser l'action (format: "docker.list", "docker.start", etc.)
     const [module, actionName] = action.split(".");
 
@@ -85,7 +92,23 @@ export async function handleMessage(message, sendMessage) {
               sendMessage(createStream(id, "stdout", data));
             }
           );
-          // Le stream est géré par le callback, on ne renvoie pas de réponse immédiate
+          registerResource(id, {
+            type: "docker-logs",
+            cleanup: () => {
+              if (logsResult?.stream?.destroy) {
+                logsResult.stream.destroy();
+              } else if (logsResult?.stream?.end) {
+                logsResult.stream.end();
+              }
+            },
+          });
+          isStreamingAction = true;
+          sendMessage(
+            createResponse(id, true, {
+              stream: "stdout",
+              mode: "logs.follow",
+            })
+          );
           return;
         } else {
           // Mode one-shot
@@ -105,7 +128,23 @@ export async function handleMessage(message, sendMessage) {
               sendMessage(createStream(id, "stdout", JSON.stringify(stats)));
             }
           );
-          // Le stream est géré par le callback, on ne renvoie pas de réponse immédiate
+          registerResource(id, {
+            type: "docker-stats",
+            cleanup: () => {
+              if (statsResult?.stats?.destroy) {
+                statsResult.stats.destroy();
+              } else if (statsResult?.stats?.end) {
+                statsResult.stats.end();
+              }
+            },
+          });
+          isStreamingAction = true;
+          sendMessage(
+            createResponse(id, true, {
+              stream: "stdout",
+              mode: "stats.stream",
+            })
+          );
           return;
         } else {
           // Mode one-shot
@@ -123,13 +162,17 @@ export async function handleMessage(message, sendMessage) {
     }
 
     // Envoyer la réponse
-    sendMessage(createResponse(id, true, result));
+    if (!isStreamingAction) {
+      registerResource(id, null);
+      sendMessage(createResponse(id, true, result));
+    }
   } catch (error) {
     logger.error("Erreur lors du traitement du message", {
       id,
       action,
       error: error.message,
     });
+    registerResource(id, null);
     sendMessage(createError(id, error.message));
   }
 }

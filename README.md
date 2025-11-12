@@ -7,9 +7,12 @@ Agent léger pour la gestion des conteneurs Docker sur les serveurs distants via
 - **Gestion Docker** : Liste, démarrage, arrêt, redémarrage de conteneurs
 - **Logs en temps réel** : Récupération et streaming des logs Docker
 - **Statistiques** : Monitoring des performances des conteneurs
-- **Communication WebSocket** : Connexion permanente avec reconnexion automatique
-- **Heartbeat** : Envoi périodique de l'état du serveur
-- **Sécurité** : Validation des commandes, sanitization des paramètres
+- **Communication WebSocket** : 
+  - Serveur WebSocket pour connexions frontend directes
+  - Client WebSocket optionnel pour connexion au backend centralisé
+  - Reconnexion automatique
+- **Heartbeat** : Envoi périodique de l'état du serveur (mode backend)
+- **Sécurité** : Validation des commandes, sanitization des paramètres, authentification par token
 
 ## 📋 Prérequis
 
@@ -34,19 +37,27 @@ cp .env.example .env
 Variables d'environnement (`.env`) :
 
 ```env
-# Backend WebSocket URL
-AGENT_BACKEND_URL=wss://api.devoups.io/agent/connect
+# Backend WebSocket URL (optionnel en mode autonome)
+# AGENT_BACKEND_URL=wss://api.devoups.io/agent/connect
 
-# Authentification
+# Authentification (backend + frontend par défaut)
 AGENT_TOKEN=your-jwt-token-here
+
+# Jeton dédié pour les clients frontend (optionnel)
+# AGENT_CLIENT_TOKEN=your-frontend-token
 
 # Identification du serveur
 AGENT_HOSTNAME=server-01
 AGENT_SERVER_ID=uuid-from-database
 
+# Serveur WebSocket Frontend
+AGENT_FRONTEND_HOST=0.0.0.0
+AGENT_FRONTEND_PORT=7080
+
 # Configuration
 AGENT_HEARTBEAT_INTERVAL=30000
 AGENT_RECONNECT_DELAY=5000
+AGENT_RECONNECT_MAX_DELAY=60000
 AGENT_LOG_LEVEL=info
 ```
 
@@ -70,13 +81,25 @@ npm start
 # Construire l'image
 docker build -t devoups-agent:latest .
 
-# Lancer le conteneur
+# Lancer le conteneur (mode autonome avec serveur WebSocket frontend)
 docker run -d \
   --name devoups-agent \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -p 7080:7080 \
+  -e AGENT_TOKEN=your-token \
+  -e AGENT_HOSTNAME=server-01 \
+  -e AGENT_FRONTEND_PORT=7080 \
+  devoups-agent:latest
+
+# Ou avec connexion au backend centralisé (optionnel)
+docker run -d \
+  --name devoups-agent \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  -p 7080:7080 \
   -e AGENT_BACKEND_URL=wss://api.devoups.io/agent/connect \
   -e AGENT_TOKEN=your-token \
   -e AGENT_HOSTNAME=server-01 \
+  -e AGENT_FRONTEND_PORT=7080 \
   devoups-agent:latest
 ```
 
@@ -86,9 +109,13 @@ docker run -d \
 docker-compose up -d
 ```
 
+> **Note** : Le `docker-compose.yml` utilise `network_mode: host`, donc le serveur WebSocket frontend est directement accessible sur le port `AGENT_FRONTEND_PORT` (par défaut 7080) sans mapping de port supplémentaire.
+
 ## 📡 Protocole de communication
 
-### Messages reçus du backend
+L'agent accepte les mêmes messages depuis le frontend (via le serveur WebSocket) ou depuis le backend (via le client WebSocket).
+
+### Messages reçus (frontend ou backend)
 
 ```json
 {
@@ -120,7 +147,7 @@ docker-compose up -d
 }
 ```
 
-### Messages envoyés au backend
+### Messages envoyés (vers frontend ou backend)
 
 **Réponse de succès :**
 ```json
@@ -172,7 +199,8 @@ devoups-agent/
 │   ├── config/
 │   │   └── env.js               # Configuration
 │   ├── websocket/
-│   │   ├── client.js            # Client WebSocket
+│   │   ├── client.js            # Client WebSocket (backend)
+│   │   ├── server.js            # Serveur WebSocket (frontend)
 │   │   └── handlers.js          # Gestionnaires de messages
 │   ├── modules/
 │   │   └── docker/
@@ -189,12 +217,28 @@ devoups-agent/
 └── package.json
 ```
 
+### Architecture de communication
+
+L'agent peut fonctionner en deux modes :
+
+**Mode autonome (recommandé) :**
+```
+Frontend → WebSocket (port 7080) → Agent → Docker
+```
+
+**Mode avec backend centralisé :**
+```
+Frontend → WebSocket (port 7080) → Agent → Docker
+Backend → WebSocket (wss://...) → Agent → Docker
+```
+
 ## 🔒 Sécurité
 
 - Validation de toutes les actions Docker (liste blanche)
 - Sanitization des noms de conteneurs
-- Authentification via token JWT
-- Communication sortante uniquement (pas de port d'écoute)
+- Authentification via token JWT (backend) et token côté frontend (`token` dans l'URL)
+- Serveur WebSocket authentifié exposé sur `AGENT_FRONTEND_PORT`
+- Communication sortante vers le backend (optionnelle) pour la supervision centrale
 - Exécution en utilisateur non-root dans le conteneur
 
 ## 📝 Logs
@@ -214,6 +258,439 @@ Le niveau de log est configurable via `AGENT_LOG_LEVEL`.
 - Module UFW
 - Collecte de métriques système (CPU, RAM, Disk)
 - Gestion des backups
+
+## 💻 Utilisation depuis le frontend
+
+Le frontend se connecte directement à l'agent via WebSocket, similaire au terminal. Pas besoin de passer par des API routes HTTP/HTTPS, la communication se fait directement via un canal WebSocket ouvert.
+
+### Architecture de communication
+
+```
+Frontend → WebSocket → Agent → Docker
+         ← WebSocket ← Agent ← Docker
+```
+
+L'agent expose maintenant un serveur WebSocket sur le port configuré (`AGENT_FRONTEND_PORT`, par défaut 7080) pour que le frontend puisse s'y connecter directement.
+
+### Configuration frontend
+
+Variables d'environnement Next.js (`.env.local`) :
+
+```env
+NEXT_PUBLIC_AGENT_HOST=localhost
+NEXT_PUBLIC_AGENT_PORT=7080
+NEXT_PUBLIC_AGENT_TOKEN=your-frontend-token
+```
+
+En production, utilisez l'IP ou le domaine du serveur :
+
+```env
+NEXT_PUBLIC_AGENT_HOST=37.59.118.195
+NEXT_PUBLIC_AGENT_PORT=7080
+NEXT_PUBLIC_AGENT_TOKEN=your-frontend-token
+```
+
+> ℹ️ Le paramètre `token` passé dans l'URL WebSocket doit correspondre à `AGENT_CLIENT_TOKEN` (ou à `AGENT_TOKEN` si aucun token dédié n'est défini).  
+> Le paramètre `serverId` est optionnel et sert uniquement d'identifiant de contexte côté agent (logs).
+
+### Exemple : Connexion WebSocket et démarrage d'un conteneur
+
+```javascript
+// Connexion WebSocket à l'agent
+const agentHost = process.env.NEXT_PUBLIC_AGENT_HOST || "localhost";
+const agentPort = process.env.NEXT_PUBLIC_AGENT_PORT || "7080";
+const serverId = "server-01"; // Identifiant logique pour les logs côté agent
+const agentToken =
+  process.env.NEXT_PUBLIC_AGENT_TOKEN || "your-frontend-token";
+
+const wsUrl = `ws://${agentHost}:${agentPort}?token=${encodeURIComponent(
+  agentToken
+)}&serverId=${encodeURIComponent(serverId)}`;
+
+const socket = new WebSocket(wsUrl);
+
+socket.onopen = () => {
+  console.log("Connecté à l'agent");
+  
+  // Envoyer une commande pour démarrer un conteneur
+  const message = {
+    id: crypto.randomUUID(),
+    action: "docker.start",
+    params: {
+      container: "webapp-container"
+    }
+  };
+  
+  socket.send(JSON.stringify(message));
+};
+
+socket.onmessage = (event) => {
+  const response = JSON.parse(event.data);
+  
+  if (response.type === "response" && response.success) {
+    console.log("Conteneur démarré:", response.data);
+  } else if (response.type === "stream") {
+    console.log("Stream:", response.stream, response.data);
+  } else if (response.type === "response" && !response.success) {
+    console.error("Erreur:", response.error);
+  }
+};
+
+socket.onerror = (error) => {
+  console.error("Erreur WebSocket:", error);
+};
+
+socket.onclose = () => {
+  console.log("Connexion fermée");
+};
+```
+
+> Lorsqu'une action ouvre un flux (`docker.logs` avec `follow: true`, `docker.stats` avec `stream: true`), l'agent renvoie d'abord un message `response` avec `mode` indiquant le type de stream, puis des messages `stream` continus jusqu'à la fermeture de la connexion.
+
+### Exemple : Arrêter un conteneur
+
+```javascript
+// Depuis une connexion WebSocket déjà établie
+const stopMessage = {
+  id: crypto.randomUUID(),
+  action: "docker.stop",
+  params: {
+    container: "webapp-container"
+  }
+};
+
+socket.send(JSON.stringify(stopMessage));
+```
+
+### Exemple complet avec React
+
+```javascript
+import { useEffect, useRef, useState } from 'react';
+
+function ContainerControl({ serverId, containerId, token }) {
+  const socketRef = useRef<WebSocket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    // Connexion WebSocket à l'agent
+    const agentHost = process.env.NEXT_PUBLIC_AGENT_HOST || "localhost";
+    const agentPort = process.env.NEXT_PUBLIC_AGENT_PORT || "7080";
+    const agentToken = process.env.NEXT_PUBLIC_AGENT_TOKEN || token;
+    const wsUrl = `ws://${agentHost}:${agentPort}?token=${encodeURIComponent(
+      agentToken
+    )}&serverId=${encodeURIComponent(serverId)}`;
+
+    const socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => {
+      setIsConnected(true);
+      setError(null);
+    };
+
+    socket.onmessage = (event) => {
+      const response = JSON.parse(event.data);
+      
+      if (response.type === "response") {
+        setLoading(false);
+        if (response.success) {
+          console.log("Action réussie:", response.data);
+        } else {
+          setError(response.error || "Erreur inconnue");
+        }
+      } else if (response.type === "stream") {
+        console.log("Stream:", response.stream, response.data);
+      }
+    };
+
+    socket.onerror = (err) => {
+      setError("Erreur de connexion WebSocket");
+      setIsConnected(false);
+    };
+
+    socket.onclose = () => {
+      setIsConnected(false);
+    };
+
+    socketRef.current = socket;
+
+    return () => {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+    };
+  }, [serverId, token]);
+
+  const sendCommand = (action: string, params: Record<string, any>) => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+      setError("Non connecté à l'agent");
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    const message = {
+      id: crypto.randomUUID(),
+      action,
+      params
+    };
+
+    socketRef.current.send(JSON.stringify(message));
+  };
+
+  const startContainer = () => {
+    sendCommand("docker.start", { container: containerId });
+  };
+
+  const stopContainer = () => {
+    sendCommand("docker.stop", { container: containerId });
+  };
+
+  return (
+    <div>
+      <div>
+        {isConnected ? (
+          <span className="text-green-400">● Connecté</span>
+        ) : (
+          <span className="text-red-400">● Déconnecté</span>
+        )}
+      </div>
+      
+      <button 
+        onClick={startContainer} 
+        disabled={loading || !isConnected}
+      >
+        {loading ? 'Chargement...' : 'Démarrer'}
+      </button>
+      
+      <button 
+        onClick={stopContainer} 
+        disabled={loading || !isConnected}
+      >
+        {loading ? 'Chargement...' : 'Arrêter'}
+      </button>
+      
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+    </div>
+  );
+}
+```
+
+### Exemple avec gestion d'erreurs et reconnexion
+
+```javascript
+import { useEffect, useRef, useState } from 'react';
+
+function useAgentWebSocket(serverId: string, token: string) {
+  const socketRef = useRef<WebSocket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const maxReconnectAttempts = 5;
+
+  const connect = () => {
+    const agentHost = process.env.NEXT_PUBLIC_AGENT_HOST || "localhost";
+    const agentPort = process.env.NEXT_PUBLIC_AGENT_PORT || "7080";
+    const agentToken = process.env.NEXT_PUBLIC_AGENT_TOKEN || token;
+    const wsUrl = `ws://${agentHost}:${agentPort}?token=${encodeURIComponent(
+      agentToken
+    )}&serverId=${encodeURIComponent(serverId)}`;
+
+    const socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => {
+      setIsConnected(true);
+      reconnectAttemptsRef.current = 0;
+    };
+
+    socket.onclose = () => {
+      setIsConnected(false);
+      
+      // Tentative de reconnexion
+      if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+        reconnectAttemptsRef.current++;
+        const delay = Math.min(1000 * reconnectAttemptsRef.current, 5000);
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connect();
+        }, delay);
+      }
+    };
+
+    socket.onerror = () => {
+      setIsConnected(false);
+    };
+
+    socketRef.current = socket;
+  };
+
+  useEffect(() => {
+    connect();
+
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (socketRef.current) {
+        socketRef.current.close();
+      }
+    };
+  }, [serverId, token]);
+
+  const sendMessage = (action: string, params: Record<string, any>) => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) {
+      throw new Error("WebSocket non connecté");
+    }
+
+    const message = {
+      id: crypto.randomUUID(),
+      action,
+      params
+    };
+
+    socketRef.current.send(JSON.stringify(message));
+    
+    // Retourner une Promise qui se résout avec la réponse
+    return new Promise((resolve, reject) => {
+      const messageHandler = (event: MessageEvent) => {
+        const response = JSON.parse(event.data);
+        
+        if (response.type === "response" && response.id === message.id) {
+          socketRef.current?.removeEventListener('message', messageHandler);
+          
+          if (response.success) {
+            resolve(response.data);
+          } else {
+            reject(new Error(response.error || "Erreur inconnue"));
+          }
+        }
+      };
+
+      socketRef.current?.addEventListener('message', messageHandler);
+      
+      // Timeout après 30 secondes
+      let timeoutId: NodeJS.Timeout;
+
+      const clearTimeoutOnResponse = (event: MessageEvent) => {
+        const response = JSON.parse(event.data);
+        if (response.type === "response" && response.id === message.id) {
+          clearTimeout(timeoutId);
+          socketRef.current?.removeEventListener(
+            'message',
+            clearTimeoutOnResponse
+          );
+        }
+      };
+
+      socketRef.current?.addEventListener('message', clearTimeoutOnResponse);
+
+      timeoutId = setTimeout(() => {
+        socketRef.current?.removeEventListener('message', messageHandler);
+        socketRef.current?.removeEventListener(
+          'message',
+          clearTimeoutOnResponse
+        );
+        reject(new Error("Timeout"));
+      }, 30000);
+    });
+  };
+
+  return { isConnected, sendMessage };
+}
+
+// Utilisation
+function ContainerControl({ serverId, containerId, token }) {
+  const { isConnected, sendMessage } = useAgentWebSocket(serverId, token);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const startContainer = async () => {
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await sendMessage("docker.start", { container: containerId });
+      console.log("Conteneur démarré:", result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur inconnue");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const stopContainer = async () => {
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const result = await sendMessage("docker.stop", { container: containerId });
+      console.log("Conteneur arrêté:", result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erreur inconnue");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div>
+      <div>
+        {isConnected ? (
+          <span className="text-green-400">● Connecté</span>
+        ) : (
+          <span className="text-red-400">● Déconnecté</span>
+        )}
+      </div>
+      
+      <button onClick={startContainer} disabled={loading || !isConnected}>
+        {loading ? 'Chargement...' : 'Démarrer'}
+      </button>
+      
+      <button onClick={stopContainer} disabled={loading || !isConnected}>
+        {loading ? 'Chargement...' : 'Arrêter'}
+      </button>
+      
+      {error && <p style={{ color: 'red' }}>{error}</p>}
+    </div>
+  );
+}
+```
+
+## 🔧 Dépannage
+
+### Le frontend ne peut pas se connecter
+
+1. Vérifier que l'agent est démarré et écoute sur le bon port :
+   ```bash
+   netstat -tuln | grep 7080
+   # ou
+   ss -tuln | grep 7080
+   ```
+
+2. Vérifier les logs de l'agent :
+   ```bash
+   docker logs devoups-agent
+   # ou
+   npm run dev
+   ```
+
+3. Vérifier que le token correspond :
+   - Le token dans l'URL WebSocket doit correspondre à `AGENT_CLIENT_TOKEN` (ou `AGENT_TOKEN` si non défini)
+   - Vérifier les variables d'environnement `NEXT_PUBLIC_AGENT_TOKEN` côté frontend
+
+4. Vérifier les règles de pare-feu :
+   - Le port `AGENT_FRONTEND_PORT` doit être accessible depuis le frontend
+
+### Erreur "Invalid token"
+
+- Vérifier que `AGENT_CLIENT_TOKEN` (ou `AGENT_TOKEN`) correspond au token passé dans l'URL WebSocket
+- Le token doit être encodé dans l'URL : `?token=${encodeURIComponent(token)}`
+
+### Le serveur WebSocket ne démarre pas
+
+- Vérifier que le port `AGENT_FRONTEND_PORT` n'est pas déjà utilisé
+- Vérifier les permissions du processus (doit pouvoir écouter sur le port)
 
 ## 📄 Licence
 
