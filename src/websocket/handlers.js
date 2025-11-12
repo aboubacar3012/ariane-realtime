@@ -1,0 +1,136 @@
+/**
+ * Gestionnaires de messages WebSocket pour l'agent DevOUPS
+ * @module websocket/handlers
+ */
+
+import {
+  listContainers,
+  inspectContainer,
+  startContainer,
+  stopContainer,
+  restartContainer,
+  getContainerLogs,
+  getContainerStats,
+  execContainer,
+} from "../modules/docker/actions.js";
+import { createResponse, createStream, createError } from "../types/messages.js";
+import { logger } from "../utils/logger.js";
+import { isValidDockerAction } from "../utils/validator.js";
+
+/**
+ * Traite un message reçu du backend
+ * @param {Object} message - Message reçu
+ * @param {Function} sendMessage - Fonction pour envoyer une réponse
+ * @returns {Promise<void>}
+ */
+export async function handleMessage(message, sendMessage) {
+  const { id, action, params = {} } = message;
+
+  if (!id) {
+    logger.warn("Message reçu sans ID", { message });
+    return;
+  }
+
+  try {
+    // Parser l'action (format: "docker.list", "docker.start", etc.)
+    const [module, actionName] = action.split(".");
+
+    if (module !== "docker") {
+      sendMessage(
+        createError(id, `Module non supporté: ${module}`)
+      );
+      return;
+    }
+
+    if (!isValidDockerAction(actionName)) {
+      sendMessage(
+        createError(id, `Action Docker non autorisée: ${actionName}`)
+      );
+      return;
+    }
+
+    logger.debug("Traitement de l'action", { id, action, params });
+
+    // Router vers la bonne action Docker
+    let result;
+
+    switch (actionName) {
+      case "list":
+        result = await listContainers(params);
+        break;
+
+      case "inspect":
+        result = await inspectContainer(params);
+        break;
+
+      case "start":
+        result = await startContainer(params);
+        break;
+
+      case "stop":
+        result = await stopContainer(params);
+        break;
+
+      case "restart":
+        result = await restartContainer(params);
+        break;
+
+      case "logs": {
+        const { follow } = params;
+        if (follow) {
+          // Mode streaming
+          const logsResult = await getContainerLogs(
+            params,
+            (data) => {
+              sendMessage(createStream(id, "stdout", data));
+            }
+          );
+          // Le stream est géré par le callback, on ne renvoie pas de réponse immédiate
+          return;
+        } else {
+          // Mode one-shot
+          result = await getContainerLogs(params);
+          result = result.logs;
+        }
+        break;
+      }
+
+      case "stats": {
+        const { stream } = params;
+        if (stream) {
+          // Mode streaming
+          const statsResult = await getContainerStats(
+            params,
+            (stats) => {
+              sendMessage(createStream(id, "stdout", JSON.stringify(stats)));
+            }
+          );
+          // Le stream est géré par le callback, on ne renvoie pas de réponse immédiate
+          return;
+        } else {
+          // Mode one-shot
+          result = await getContainerStats(params);
+        }
+        break;
+      }
+
+      case "exec":
+        result = await execContainer(params);
+        break;
+
+      default:
+        throw new Error(`Action non implémentée: ${actionName}`);
+    }
+
+    // Envoyer la réponse
+    sendMessage(createResponse(id, true, result));
+  } catch (error) {
+    logger.error("Erreur lors du traitement du message", {
+      id,
+      action,
+      error: error.message,
+    });
+    sendMessage(createError(id, error.message));
+  }
+}
+

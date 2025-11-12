@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  devoups-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: devoups-agent
+    restart: unless-stopped
+    environment:
+      - AGENT_BACKEND_URL=${AGENT_BACKEND_URL:-wss://localhost:3000/agent/connect}
+      - AGENT_TOKEN=${AGENT_TOKEN}
+      - AGENT_HOSTNAME=${AGENT_HOSTNAME:-test-server}
+      - AGENT_SERVER_ID=${AGENT_SERVER_ID}
+      - AGENT_HEARTBEAT_INTERVAL=${AGENT_HEARTBEAT_INTERVAL:-30000}
+      - AGENT_RECONNECT_DELAY=${AGENT_RECONNECT_DELAY:-5000}
+      - AGENT_LOG_LEVEL=${AGENT_LOG_LEVEL:-info}
+      - DOCKER_SOCKET_PATH=/var/run/docker.sock
+    volumes:
+      # Monter le socket Docker pour accéder au daemon Docker
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    network_mode: host
+    # Nécessite l'accès au socket Docker du host
+    # Note: En production, considérer l'utilisation de Docker-in-Docker ou d'un socket sécurisé
